@@ -18,3 +18,8 @@ jobs:
         with:
           java-version: 11
 
+      - name: Setup Ruby
+        uses: actions/setup-ruby@v1
+        with:
+          ruby-version: '2.6'
+
