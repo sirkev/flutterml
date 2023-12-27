@@ -1,20 +1,158 @@
-name: Analyse,Test, build, distribute, release - android
+name: build_test_deploy
 
 on:
   push:
     branches:
       - main
+      - dev
+
 jobs:
-  CI-Upload-APK:
-    name: Production build uploading
-    runs-on: ubuntu-latest
-
+  install-docker:
+    name: Install Docker
+    runs-on: self-hosted
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v2
+      - name: Install Docker
+        run: |
+          if ! command -v docker &> /dev/null; then
+            echo "docker is not installed. Installing docker ..."
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S apt-get update
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S apt install docker.io -y
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S systemctl start docker
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S systemctl enable docker
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S usermod -aG docker $USER
+          else
+            echo "Docker is installed"
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S docker ps
+          fi
 
-      - name: Setup JDK
-        uses: actions/setup-java@v1
+      - name: Install build tools
+        run: |
+          echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S sudo apt-get install clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev -y
+
+
+      - name: Download Android SDK
+        run: |
+          if [ ! -d "$HOME/android-sdk" ]; then
+            echo "Downloading Android SDK ..."
+            curl -s https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip -o $HOME/android-sdk.zip
+            unzip -q $HOME/android-sdk.zip -d $HOME/android-sdk
+            rm $HOME/android-sdk.zip
+          else
+            echo "Android SDK is already downloaded"
+          fi
+
+      - name: Download Java
+        run: |
+          if ! command -v java &> /dev/null; then
+            echo "Downloading Java ..."
+            echo "${{ secrets.SUDO_PASSWORD }}" | sudo -S apt-get install -y openjdk-11-jdk
+          else
+            echo "Java is already installed"
+          fi
+  
+
+  install-node-js:
+    name: setup_node_js
+    runs-on: self-hosted
+    needs: install-docker
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
         with:
-          java-version: 11
+          node-version: 18
+      - run: |
+          node -v
 
+  build_test_notify:
+    name: build_and_release_android
+    runs-on: self-hosted
+    needs: install-docker
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Cache Flutter SDK
+        uses: actions/cache@v2
+        with:
+          path: ~/.flutter
+          key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-flutter-
+
+      - name: Cache Android SDK
+        uses: actions/cache@v2
+        with:
+          path: ~/.android
+          key: ${{ runner.os }}-android-${{ hashFiles('**/build.gradle') }}
+          restore-keys: ${{ runner.os }}-android-
+
+      - name: Cache Gradle
+        uses: actions/cache@v2
+        with:
+          path: ~/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle') }}-${{ hashFiles('**/gradle.properties') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Setup Java
+        uses: actions/setup-java@v2
+        with:
+          java-version: '11'
+
+      - name: Setup Android SDK and Build Tools
+        uses: android-actions/setup-android@v2
+        with:
+          sdk-path: $HOME/android-sdk
+          ndk-version: '21.4.7075529'
+          platform-tools-version: '31.0.3'
+          build-tools-version: '30.0.3'
+
+      - name: Install Flutter
+        run: |
+          export PATH="$HOME/flutter/bin:$PATH"
+          flutter --version || echo "Flutter is not installed"
+          flutter upgrade
+
+      - name: Install flutter dependencies
+        run: flutter pub get
+
+      - name: Run lint
+        run: flutter analyze
+
+      - name: Run tests
+        run: flutter test --coverage
+
+      - name: Build APK
+        run: flutter build apk
+  release-to-github:
+    name: Release to GitHub
+    needs: build_test_notify
+    runs-on: self-hosted
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v2
+      - name: Create tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a "v$(date +%Y%m%d%H%M%S)" -m "Release"
+          git push --tags
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: latest
+          artifacts: "build/app/outputs/flutter-apk/app-release.apk"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  release-to-firebase:
+    name: Release to Firebase
+    needs: release-to-github
+    runs-on: self-hosted
+    steps:
+      - name: Deploy to Firebase App Distribution
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_APP_ID }}
+          token: ${{ secrets.FIREBASE_TOKEN }}
+          releaseNotes: "Release Notes"
+          groups: android_testers
+          file: "build/app/outputs/flutter-apk/app-release.apk"
+          #releaseNotesFile: "release-notes.txt"
