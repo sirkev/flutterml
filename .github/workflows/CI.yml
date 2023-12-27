@@ -2,8 +2,8 @@ name: Analyse,Test, build, distribute, release - android
 
 on:
   push:
-    branches: [ main ]
-
+    branches:
+      - main
 jobs:
   CI-Upload-APK:
     name: Production build uploading
